@@ -43,8 +43,9 @@ const WALL_JUMP_VY0: f32 = -880.0; // px/s (initial up)
 const CASE_DUR: f32 = 1.5; // seconds per case (paused during Jump/Land)
 const START_MARGIN: i32 = 40;
 
-// Landing hold time after reaching floor
-const LANDING_HOLD: f32 = 0.5;
+// Landing behavior
+const LANDING_HOLD: f32 = 0.5; // animation hold
+const LANDING_DRIFT: f32 = 140.0; // px/s horizontal slide during landing
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Surface {
@@ -213,13 +214,13 @@ impl Default for TestSeq {
             action: Action::Jumping,
             dir: 1.0,
             dur: CASE_DUR,
-        }); // will arc left
+        }); // arc left
         cases.push(TestCase {
             surface: Surface::RightWall,
             action: Action::Jumping,
             dir: -1.0,
             dur: CASE_DUR,
-        }); // still arc left (dir irrelevant on walls for jump)
+        }); // arc left
 
         // Ceiling (no jumps)
         cases.push(TestCase {
@@ -265,13 +266,13 @@ impl Default for TestSeq {
             action: Action::Jumping,
             dir: -1.0,
             dur: CASE_DUR,
-        }); // will arc right
+        }); // arc right
         cases.push(TestCase {
             surface: Surface::LeftWall,
             action: Action::Jumping,
             dir: 1.0,
             dur: CASE_DUR,
-        }); // will arc right
+        }); // arc right
         Self {
             cases,
             i: 0,
@@ -745,19 +746,25 @@ fn apply_motion_and_orientation(
         );
 
         if pos.y >= max_y {
-            // Touchdown
+            // Touchdown: choose landing heading
             st.flight = FlightKind::None;
             st.surface = Surface::Floor;
             st.action = Action::Landing;
 
-            // Facing: floor jumps keep their left/right; wall jumps face right by default
-            let came_from_wall = matches!(st.flight_from, Surface::RightWall | Surface::LeftWall);
-            st.dir = if came_from_wall {
-                1.0
-            } else if st.vx >= 0.0 {
-                1.0
-            } else {
-                -1.0
+            // Specific rule you asked:
+            // - From RightWall -> land heading LEFT
+            // - From LeftWall  -> land heading RIGHT
+            // - From Floor     -> keep direction based on vx sign
+            st.dir = match st.flight_from {
+                Surface::RightWall => -1.0,
+                Surface::LeftWall => 1.0,
+                _ => {
+                    if st.vx >= 0.0 {
+                        1.0
+                    } else {
+                        -1.0
+                    }
+                }
             };
 
             st.landing_left = LANDING_HOLD;
@@ -778,8 +785,15 @@ fn apply_motion_and_orientation(
 
         match st.surface {
             Surface::Floor => {
-                if matches!(st.action, Action::Move | Action::Rolling) {
-                    pos.x = (pos.x as f32 + SPEED_FLOOR * st.dir * dt) as i32;
+                match st.action {
+                    Action::Move | Action::Rolling => {
+                        pos.x = (pos.x as f32 + SPEED_FLOOR * st.dir * dt) as i32;
+                    }
+                    Action::Landing => {
+                        // Slide along the floor during the landing animation
+                        pos.x = (pos.x as f32 + LANDING_DRIFT * st.dir * dt) as i32;
+                    }
+                    _ => {}
                 }
                 pos.y = max_y;
             }
@@ -818,6 +832,6 @@ fn apply_motion_and_orientation(
         }
     }
 
-    st.window_pos = pos;
-    win.position = WindowPosition::At(pos);
+    st.window_pos = pos.clamp(IVec2::new(0, 0), IVec2::new(max_x, max_y));
+    win.position = WindowPosition::At(st.window_pos);
 }
