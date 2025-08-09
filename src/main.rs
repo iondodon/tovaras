@@ -24,12 +24,16 @@ const FPS_MOVE: f32 = 14.0;
 const FPS_CLIMB: f32 = 12.0;
 const FPS_HIDE: f32 = 10.0;
 const FPS_ROLL: f32 = 16.0;
-const FPS_JUMP: f32 = 1.0;
+const FPS_JUMP: f32 = 1.0; // 1 frame, hold briefly
 const FPS_LAND: f32 = 20.0;
 
 const SPEED_FLOOR: f32 = 160.0;
 const SPEED_WALL: f32 = 120.0;
 const SPEED_CEIL: f32 = 160.0;
+
+// ===== Test sequencer config =====
+const CASE_DUR: f32 = 1.5; // seconds per case
+const START_MARGIN: i32 = 40;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Surface {
@@ -84,10 +88,237 @@ impl Anim {
 struct PetState {
     surface: Surface,
     action: Action,
-    dir: f32, // +1 clockwise/right/up, -1 opposite
-    t: f32,   // scratch timer (unused in this minimal loop)
-    window_pos: IVec2,
+    dir: f32,          // +1 or -1 depending on movement sense on the current surface
+    window_pos: IVec2, // top-left px
 }
+
+// A single test case
+#[derive(Clone, Copy)]
+struct TestCase {
+    surface: Surface,
+    action: Action,
+    dir: f32,
+    dur: f32,
+}
+
+// Test sequencer
+#[derive(Resource)]
+struct TestSeq {
+    cases: Vec<TestCase>,
+    i: usize,
+    left: f32,
+}
+
+impl Default for TestSeq {
+    fn default() -> Self {
+        // Enumerate all appropriate cases
+        let mut cases = Vec::new();
+
+        // Floor cases
+        cases.push(TestCase {
+            surface: Surface::Floor,
+            action: Action::Move,
+            dir: 1.0,
+            dur: CASE_DUR,
+        });
+        cases.push(TestCase {
+            surface: Surface::Floor,
+            action: Action::Move,
+            dir: -1.0,
+            dur: CASE_DUR,
+        });
+        cases.push(TestCase {
+            surface: Surface::Floor,
+            action: Action::Idle,
+            dir: 1.0,
+            dur: CASE_DUR,
+        });
+        cases.push(TestCase {
+            surface: Surface::Floor,
+            action: Action::Rolling,
+            dir: 1.0,
+            dur: CASE_DUR,
+        });
+        cases.push(TestCase {
+            surface: Surface::Floor,
+            action: Action::Rolling,
+            dir: -1.0,
+            dur: CASE_DUR,
+        });
+        cases.push(TestCase {
+            surface: Surface::Floor,
+            action: Action::Hiding,
+            dir: 1.0,
+            dur: CASE_DUR,
+        });
+        // Jumps/Lands from floor both directions
+        cases.push(TestCase {
+            surface: Surface::Floor,
+            action: Action::Jumping,
+            dir: 1.0,
+            dur: 0.6,
+        });
+        cases.push(TestCase {
+            surface: Surface::Floor,
+            action: Action::Landing,
+            dir: 1.0,
+            dur: CASE_DUR,
+        });
+        cases.push(TestCase {
+            surface: Surface::Floor,
+            action: Action::Jumping,
+            dir: -1.0,
+            dur: 0.6,
+        });
+        cases.push(TestCase {
+            surface: Surface::Floor,
+            action: Action::Landing,
+            dir: -1.0,
+            dur: CASE_DUR,
+        });
+
+        // Right wall: climb up/down + hide + jump up/down
+        cases.push(TestCase {
+            surface: Surface::RightWall,
+            action: Action::Climb,
+            dir: 1.0,
+            dur: CASE_DUR,
+        });
+        cases.push(TestCase {
+            surface: Surface::RightWall,
+            action: Action::Climb,
+            dir: -1.0,
+            dur: CASE_DUR,
+        });
+        cases.push(TestCase {
+            surface: Surface::RightWall,
+            action: Action::Hiding,
+            dir: 1.0,
+            dur: CASE_DUR,
+        });
+        cases.push(TestCase {
+            surface: Surface::RightWall,
+            action: Action::Jumping,
+            dir: 1.0,
+            dur: 0.6,
+        });
+        cases.push(TestCase {
+            surface: Surface::RightWall,
+            action: Action::Landing,
+            dir: 1.0,
+            dur: CASE_DUR,
+        });
+        cases.push(TestCase {
+            surface: Surface::RightWall,
+            action: Action::Jumping,
+            dir: -1.0,
+            dur: 0.6,
+        });
+        cases.push(TestCase {
+            surface: Surface::RightWall,
+            action: Action::Landing,
+            dir: -1.0,
+            dur: CASE_DUR,
+        });
+
+        // Ceiling: crawl left/right, hide, jump left/right
+        cases.push(TestCase {
+            surface: Surface::Ceiling,
+            action: Action::Climb,
+            dir: -1.0,
+            dur: CASE_DUR,
+        }); // right->left
+        cases.push(TestCase {
+            surface: Surface::Ceiling,
+            action: Action::Climb,
+            dir: 1.0,
+            dur: CASE_DUR,
+        }); // left->right
+        cases.push(TestCase {
+            surface: Surface::Ceiling,
+            action: Action::Hiding,
+            dir: -1.0,
+            dur: CASE_DUR,
+        });
+        cases.push(TestCase {
+            surface: Surface::Ceiling,
+            action: Action::Jumping,
+            dir: -1.0,
+            dur: 0.6,
+        });
+        cases.push(TestCase {
+            surface: Surface::Ceiling,
+            action: Action::Landing,
+            dir: -1.0,
+            dur: CASE_DUR,
+        });
+        cases.push(TestCase {
+            surface: Surface::Ceiling,
+            action: Action::Jumping,
+            dir: 1.0,
+            dur: 0.6,
+        });
+        cases.push(TestCase {
+            surface: Surface::Ceiling,
+            action: Action::Landing,
+            dir: 1.0,
+            dur: CASE_DUR,
+        });
+
+        // Left wall: climb down/up + hide + jump down/up (with your 180° + flip-Y-up rule)
+        cases.push(TestCase {
+            surface: Surface::LeftWall,
+            action: Action::Climb,
+            dir: -1.0,
+            dur: CASE_DUR,
+        }); // down
+        cases.push(TestCase {
+            surface: Surface::LeftWall,
+            action: Action::Climb,
+            dir: 1.0,
+            dur: CASE_DUR,
+        }); // up
+        cases.push(TestCase {
+            surface: Surface::LeftWall,
+            action: Action::Hiding,
+            dir: 1.0,
+            dur: CASE_DUR,
+        });
+        cases.push(TestCase {
+            surface: Surface::LeftWall,
+            action: Action::Jumping,
+            dir: -1.0,
+            dur: 0.6,
+        });
+        cases.push(TestCase {
+            surface: Surface::LeftWall,
+            action: Action::Landing,
+            dir: -1.0,
+            dur: CASE_DUR,
+        });
+        cases.push(TestCase {
+            surface: Surface::LeftWall,
+            action: Action::Jumping,
+            dir: 1.0,
+            dur: 0.6,
+        });
+        cases.push(TestCase {
+            surface: Surface::LeftWall,
+            action: Action::Landing,
+            dir: 1.0,
+            dur: CASE_DUR,
+        });
+
+        Self {
+            cases,
+            i: 0,
+            left: CASE_DUR,
+        }
+    }
+}
+
+#[derive(Component)]
+struct TestTag; // attach to pet so we know it's under test sequencing
 
 fn main() {
     App::new()
@@ -115,10 +346,16 @@ fn main() {
         )
         .insert_resource(ClearColor(Color::srgba(0.0, 0.0, 0.0, 0.0)))
         .insert_resource(SheetInfo::default())
+        .insert_resource(TestSeq::default())
         .add_systems(Startup, (setup_camera, load_assets, spawn_pet))
         .add_systems(
             Update,
-            (finalize_after_load, animate_sprite, pet_fsm_and_move_window),
+            (
+                finalize_after_load,
+                animate_sprite,
+                test_driver,
+                apply_motion_and_orientation,
+            ),
         )
         .run();
 }
@@ -158,12 +395,12 @@ fn spawn_pet(mut commands: Commands, sheet: Res<SheetInfo>) {
             index: row_col_to_index(ROW_IDLE1, 0),
         },
         Pet,
+        TestTag,
         Anim::new(row_start(ROW_IDLE1), ROW_FRAMES[ROW_IDLE1], FPS_IDLE),
         PetState {
             surface: Surface::Floor,
             action: Action::Move,
-            dir: 1.0, // move right along floor initially
-            t: 0.0,
+            dir: 1.0,
             window_pos: IVec2::new(20, 20),
         },
     ));
@@ -206,8 +443,8 @@ fn finalize_after_load(
         if let Some(raw_win) = winit_windows.get_window(entity) {
             if let Some(mon) = raw_win.current_monitor() {
                 let ms = mon.size();
-                let floor_y = (ms.height as i32) - (frame_h as i32) - 20;
-                win.position = WindowPosition::At(IVec2::new(20, floor_y));
+                let floor_y = (ms.height as i32) - (frame_h as i32) - START_MARGIN;
+                win.position = WindowPosition::At(IVec2::new(START_MARGIN, floor_y));
             }
         }
     }
@@ -261,18 +498,21 @@ fn animate_sprite(time: Res<Time>, mut q: Query<(&mut TextureAtlas, &mut Anim), 
     }
 }
 
-/// Move the window around the desktop edges and pick the right animation/orientation.
-fn pet_fsm_and_move_window(
+/// Drive the sequence: set PetState to the current case, advance when time is up.
+/// Also places the window at a sensible start point for each case to avoid immediate edge-crossing.
+fn test_driver(
     time: Res<Time>,
+    mut seq: ResMut<TestSeq>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
-    mut q: Query<(&mut TextureAtlas, &mut Anim, &mut Transform, &mut PetState), With<Pet>>,
+    mut q: Query<&mut PetState, With<TestTag>>,
     winit_windows: NonSend<WinitWindows>,
     window_entity_q: Query<Entity, With<PrimaryWindow>>,
+    sheet: Res<SheetInfo>,
 ) {
-    let Ok(mut win) = windows.get_single_mut() else {
+    let Ok(mut st) = q.get_single_mut() else {
         return;
     };
-    let Ok((mut atlas, mut anim, mut tf, mut st)) = q.get_single_mut() else {
+    let Ok(mut win) = windows.get_single_mut() else {
         return;
     };
     let Ok(win_entity) = window_entity_q.get_single() else {
@@ -291,44 +531,171 @@ fn pet_fsm_and_move_window(
         (1280, 720)
     };
 
+    let fw = win.resolution.physical_width() as i32;
+    let fh = win.resolution.physical_height() as i32;
+
+    // If the cell size isn't known yet, wait
+    if sheet.frame_w == 0.0 || sheet.frame_h == 0.0 {
+        return;
+    }
+
+    seq.left -= time.delta_seconds();
+    if seq.left <= 0.0 {
+        seq.i = (seq.i + 1) % seq.cases.len();
+        let case = seq.cases[seq.i];
+        seq.left = case.dur;
+
+        // Apply case
+        st.surface = case.surface;
+        st.action = case.action;
+        st.dir = case.dir;
+
+        // Position window to a reasonable start for each surface/direction
+        let mut pos = st.window_pos;
+        match st.surface {
+            Surface::Floor => {
+                let y = screen_h - fh;
+                let x = if st.dir >= 0.0 {
+                    START_MARGIN
+                } else {
+                    screen_w - fw - START_MARGIN
+                };
+                pos = IVec2::new(x, y);
+            }
+            Surface::RightWall => {
+                let x = screen_w - fw;
+                // up starts near bottom, down starts near top
+                let y = if st.dir >= 0.0 {
+                    screen_h - fh - START_MARGIN
+                } else {
+                    START_MARGIN
+                };
+                pos = IVec2::new(x, y);
+            }
+            Surface::Ceiling => {
+                let y = 0;
+                // left starts near right edge; right starts near left edge
+                let x = if st.dir < 0.0 {
+                    screen_w - fw - START_MARGIN
+                } else {
+                    START_MARGIN
+                };
+                pos = IVec2::new(x, y);
+            }
+            Surface::LeftWall => {
+                let x = 0;
+                // down starts near top; up starts near bottom
+                let y = if st.dir < 0.0 {
+                    START_MARGIN
+                } else {
+                    screen_h - fh - START_MARGIN
+                };
+                pos = IVec2::new(x, y);
+            }
+        }
+        st.window_pos = pos;
+        win.position = WindowPosition::At(pos);
+    }
+}
+
+/// Apply motion (if the action is a moving one) and the correct orientation + animation row.
+fn apply_motion_and_orientation(
+    time: Res<Time>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut q: Query<(&mut TextureAtlas, &mut Anim, &mut Transform, &mut PetState), With<TestTag>>,
+    sheet: Res<SheetInfo>,
+) {
+    let Ok(mut win) = windows.get_single_mut() else {
+        return;
+    };
+    let Ok((mut atlas, mut anim, mut tf, mut st)) = q.get_single_mut() else {
+        return;
+    };
+
     let fw: i32 = win.resolution.physical_width() as i32;
     let fh: i32 = win.resolution.physical_height() as i32;
-
-    let mut pos = st.window_pos;
     let dt = time.delta_seconds();
 
-    // Choose row/fps/orientation for the current state, only updating when needed.
-    let mut set_surface_visual = |surface: Surface, action: Action, dir: f32| {
+    // Orientation/animation mapping honoring your rules.
+    let mut set_visual = |surface: Surface, action: Action, dir: f32| {
         // flip_x = mirror across Y axis; flip_y = mirror across X axis
         let (row, fps, rot, flip_x, flip_y) = match (surface, action) {
+            // Floor
             (Surface::Floor, Action::Move) => (ROW_WALK_R, FPS_MOVE, 0.0, dir < 0.0, false),
+            (Surface::Floor, Action::Idle) => (ROW_IDLE1, FPS_IDLE, 0.0, false, false),
+            (Surface::Floor, Action::Rolling) => (ROW_ROLL, FPS_ROLL, 0.0, dir < 0.0, false),
+            (Surface::Floor, Action::Hiding) => (ROW_HIDE, FPS_HIDE, 0.0, false, true), // mirror by X-axis
 
-            (Surface::RightWall, Action::Climb) => (ROW_CLIMB_R, FPS_CLIMB, 0.0, false, false),
+            // Right wall
+            (Surface::RightWall, Action::Climb) => (ROW_CLIMB_R, FPS_CLIMB, 0.0, false, dir < 0.0), // flip Y when going down
+            (Surface::RightWall, Action::Hiding) => (
+                ROW_HIDE,
+                FPS_HIDE,
+                -std::f32::consts::FRAC_PI_2,
+                false,
+                false,
+            ),
 
-            // Ceiling: +90°. Flip X only when moving LEFT -> RIGHT on ceiling.
+            // Ceiling
             (Surface::Ceiling, Action::Climb) => (
                 ROW_CLIMB_R,
                 FPS_CLIMB,
-                std::f32::consts::FRAC_PI_2, // +90°
-                dir > 0.0,                   // flip X when L->R
+                std::f32::consts::FRAC_PI_2,
+                dir > 0.0,
                 false,
             ),
+            (Surface::Ceiling, Action::Hiding) => (ROW_HIDE, FPS_HIDE, 0.0, false, false), // leave as is
 
-            // Left wall: +180° always. If moving UP (dir > 0), mirror by X-axis => flip Y.
+            // Left wall
             (Surface::LeftWall, Action::Climb) => (
                 ROW_CLIMB_R,
                 FPS_CLIMB,
-                std::f32::consts::PI, // +180°
+                std::f32::consts::PI,
                 false,
-                dir > 0.0, // flip Y when going up
+                dir > 0.0,
+            ), // flip Y when going up
+            (Surface::LeftWall, Action::Hiding) => (
+                ROW_HIDE,
+                FPS_HIDE,
+                std::f32::consts::FRAC_PI_2,
+                false,
+                false,
             ),
 
-            // (optional) other states can be mapped similarly
-            _ => (ROW_WALK_R, FPS_MOVE, 0.0, false, false),
+            // Jump/Land everywhere; follow the same flip/rot rules as Move on that surface
+            (Surface::Floor, Action::Jumping) => (ROW_JUMP_R, FPS_JUMP, 0.0, dir < 0.0, false),
+            (Surface::Floor, Action::Landing) => (ROW_LAND_R, FPS_LAND, 0.0, dir < 0.0, false),
+
+            (Surface::RightWall, Action::Jumping) => (ROW_JUMP_R, FPS_JUMP, 0.0, false, dir < 0.0),
+            (Surface::RightWall, Action::Landing) => (ROW_LAND_R, FPS_LAND, 0.0, false, dir < 0.0),
+
+            (Surface::Ceiling, Action::Jumping) => (
+                ROW_JUMP_R,
+                FPS_JUMP,
+                std::f32::consts::FRAC_PI_2,
+                dir > 0.0,
+                false,
+            ),
+            (Surface::Ceiling, Action::Landing) => (
+                ROW_LAND_R,
+                FPS_LAND,
+                std::f32::consts::FRAC_PI_2,
+                dir > 0.0,
+                false,
+            ),
+
+            (Surface::LeftWall, Action::Jumping) => {
+                (ROW_JUMP_R, FPS_JUMP, std::f32::consts::PI, false, dir > 0.0)
+            }
+            (Surface::LeftWall, Action::Landing) => {
+                (ROW_LAND_R, FPS_LAND, std::f32::consts::PI, false, dir > 0.0)
+            }
+
+            // Fallback
+            _ => (ROW_IDLE1, FPS_IDLE, 0.0, false, false),
         };
 
         set_anim_if_changed(&mut anim, &mut atlas, row, fps);
-
         tf.rotation = Quat::from_rotation_z(rot);
         tf.scale = Vec3::new(
             if flip_x { -1.0 } else { 1.0 },
@@ -337,73 +704,42 @@ fn pet_fsm_and_move_window(
         );
     };
 
-    // Clockwise loop: floor (→) -> right wall (↑) -> ceiling (←) -> left wall (↓) -> floor (→)
+    // Update orientation/animation first
+    set_visual(st.surface, st.action, st.dir);
+
+    // Move along the edge only for movement-like actions
+    let mut pos = st.window_pos;
     match st.surface {
         Surface::Floor => {
-            st.action = Action::Move;
-            set_surface_visual(Surface::Floor, st.action, st.dir);
-            let speed = SPEED_FLOOR * st.dir;
-            pos.y = screen_h - fh;
-            pos.x = (pos.x as f32 + speed * dt) as i32;
-
-            if pos.x + fw >= screen_w {
-                pos.x = screen_w - fw;
-                st.surface = Surface::RightWall;
-                st.action = Action::Climb;
-                st.dir = 1.0; // up
-                set_surface_visual(st.surface, st.action, st.dir);
+            if matches!(st.action, Action::Move | Action::Rolling) {
+                pos.x = (pos.x as f32 + SPEED_FLOOR * st.dir * dt) as i32;
             }
         }
         Surface::RightWall => {
-            st.action = Action::Climb;
-            set_surface_visual(Surface::RightWall, st.action, st.dir);
-            let speed = SPEED_WALL * st.dir;
-            pos.x = screen_w - fw;
-            pos.y = (pos.y as f32 - speed * dt) as i32;
-
-            if pos.y <= 0 {
-                pos.y = 0;
-                st.surface = Surface::Ceiling;
-                st.action = Action::Climb;
-                st.dir = -1.0; // left
-                set_surface_visual(st.surface, st.action, st.dir);
+            if matches!(st.action, Action::Climb) {
+                pos.y = (pos.y as f32 - SPEED_WALL * st.dir * dt) as i32; // up when dir>0
             }
         }
         Surface::Ceiling => {
-            st.action = Action::Climb;
-            set_surface_visual(Surface::Ceiling, st.action, st.dir);
-            let speed = SPEED_CEIL * st.dir;
-            pos.y = 0;
-            pos.x = (pos.x as f32 + speed * dt) as i32;
-
-            if pos.x <= 0 {
-                pos.x = 0;
-                st.surface = Surface::LeftWall;
-                st.action = Action::Climb;
-                st.dir = -1.0; // down
-                set_surface_visual(st.surface, st.action, st.dir);
+            if matches!(st.action, Action::Climb) {
+                pos.x = (pos.x as f32 + SPEED_CEIL * st.dir * dt) as i32; // left when dir<0
             }
         }
         Surface::LeftWall => {
-            st.action = Action::Climb;
-            set_surface_visual(Surface::LeftWall, st.action, st.dir);
-            let speed = SPEED_WALL * st.dir;
-            pos.x = 0;
-            pos.y = (pos.y as f32 - speed * dt) as i32;
-
-            if pos.y + fh >= screen_h {
-                pos.y = screen_h - fh;
-                st.surface = Surface::Floor;
-                st.action = Action::Move;
-                st.dir = 1.0; // right
-                set_surface_visual(st.surface, st.action, st.dir);
+            if matches!(st.action, Action::Climb) {
+                pos.y = (pos.y as f32 - SPEED_WALL * st.dir * dt) as i32; // down when dir<0
             }
         }
     }
 
-    // Clamp + apply
+    // Clamp (simple safety). In test mode we don't transition surfaces automatically.
+    let (screen_w, screen_h) = (
+        1920.max(fw + 2 * START_MARGIN),
+        1080.max(fh + 2 * START_MARGIN),
+    );
     pos.x = pos.x.clamp(0, screen_w.saturating_sub(fw));
     pos.y = pos.y.clamp(0, screen_h.saturating_sub(fh));
+
     st.window_pos = pos;
     win.position = WindowPosition::At(pos);
 }
