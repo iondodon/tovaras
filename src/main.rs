@@ -299,29 +299,42 @@ fn pet_fsm_and_move_window(
 
     // Choose row/fps/orientation for the current state, only updating when needed.
     let mut set_surface_visual = |surface: Surface, action: Action, dir: f32| {
-        let (row, fps, rot, flip_x) = match (surface, action) {
-            (Surface::Floor, Action::Move) => (ROW_WALK_R, FPS_MOVE, 0.0, dir < 0.0),
-            (Surface::Floor, Action::Rolling) => (ROW_ROLL, FPS_ROLL, 0.0, dir < 0.0),
-            (Surface::Floor, Action::Idle) => (ROW_IDLE1, FPS_IDLE, 0.0, false),
-            (Surface::RightWall, Action::Climb) => (ROW_CLIMB_R, FPS_CLIMB, 0.0, false),
+        // flip_x = mirror across Y axis; flip_y = mirror across X axis
+        let (row, fps, rot, flip_x, flip_y) = match (surface, action) {
+            (Surface::Floor, Action::Move) => (ROW_WALK_R, FPS_MOVE, 0.0, dir < 0.0, false),
+
+            (Surface::RightWall, Action::Climb) => (ROW_CLIMB_R, FPS_CLIMB, 0.0, false, false),
+
+            // Ceiling: +90°. Flip X only when moving LEFT -> RIGHT on ceiling.
             (Surface::Ceiling, Action::Climb) => (
                 ROW_CLIMB_R,
                 FPS_CLIMB,
-                std::f32::consts::FRAC_PI_2,
-                dir < 0.0,
+                std::f32::consts::FRAC_PI_2, // +90°
+                dir > 0.0,                   // flip X when L->R
+                false,
             ),
-            (Surface::LeftWall, Action::Climb) => (ROW_CLIMB_R, FPS_CLIMB, 0.0, true),
-            (Surface::Floor, Action::Hiding) => (ROW_HIDE, FPS_HIDE, 0.0, false),
-            (Surface::Ceiling, Action::Hiding) => (ROW_HIDE, FPS_HIDE, std::f32::consts::PI, false),
-            (_, Action::Jumping) => (ROW_JUMP_R, FPS_JUMP, 0.0, dir < 0.0),
-            (_, Action::Landing) => (ROW_LAND_R, FPS_LAND, 0.0, dir < 0.0),
-            _ => (ROW_IDLE1, FPS_IDLE, 0.0, false),
+
+            // Left wall: +180° always. If moving UP (dir > 0), mirror by X-axis => flip Y.
+            (Surface::LeftWall, Action::Climb) => (
+                ROW_CLIMB_R,
+                FPS_CLIMB,
+                std::f32::consts::PI, // +180°
+                false,
+                dir > 0.0, // flip Y when going up
+            ),
+
+            // (optional) other states can be mapped similarly
+            _ => (ROW_WALK_R, FPS_MOVE, 0.0, false, false),
         };
 
         set_anim_if_changed(&mut anim, &mut atlas, row, fps);
 
         tf.rotation = Quat::from_rotation_z(rot);
-        tf.scale = Vec3::new(if flip_x { -1.0 } else { 1.0 }, 1.0, 1.0);
+        tf.scale = Vec3::new(
+            if flip_x { -1.0 } else { 1.0 },
+            if flip_y { -1.0 } else { 1.0 },
+            1.0,
+        );
     };
 
     // Clockwise loop: floor (→) -> right wall (↑) -> ceiling (←) -> left wall (↓) -> floor (→)
