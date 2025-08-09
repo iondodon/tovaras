@@ -24,16 +24,27 @@ const FPS_MOVE: f32 = 14.0;
 const FPS_CLIMB: f32 = 12.0;
 const FPS_HIDE: f32 = 10.0;
 const FPS_ROLL: f32 = 16.0;
-const FPS_JUMP: f32 = 1.0; // 1 frame, hold briefly
+const FPS_JUMP: f32 = 1.0; // single-frame pose, we hold it during flight
 const FPS_LAND: f32 = 20.0;
 
 const SPEED_FLOOR: f32 = 160.0;
 const SPEED_WALL: f32 = 120.0;
 const SPEED_CEIL: f32 = 160.0;
 
+// ===== Jump physics (parabola for floor and walls) =====
+const GRAVITY: f32 = 1800.0; // px/s^2 downward (+)
+const FLOOR_JUMP_VX: f32 = 420.0; // px/s
+const FLOOR_JUMP_VY0: f32 = -900.0; // px/s (negative = up)
+
+const WALL_JUMP_VX: f32 = 520.0; // px/s (horizontal push off the wall)
+const WALL_JUMP_VY0: f32 = -880.0; // px/s (initial up)
+
 // ===== Test sequencer config =====
-const CASE_DUR: f32 = 1.5; // seconds per case
+const CASE_DUR: f32 = 1.5; // seconds per case (paused during Jump/Land)
 const START_MARGIN: i32 = 40;
+
+// Landing hold time after reaching floor
+const LANDING_HOLD: f32 = 0.5;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Surface {
@@ -84,12 +95,25 @@ impl Anim {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FlightKind {
+    None,
+    Parabola, // parabolic flight (used for floor & wall jumps)
+}
+
 #[derive(Component)]
 struct PetState {
     surface: Surface,
     action: Action,
-    dir: f32,          // +1 or -1 depending on movement sense on the current surface
+    dir: f32,          // +1 or -1 depending on movement on the current surface
     window_pos: IVec2, // top-left px
+
+    // Jump pipeline
+    flight: FlightKind,
+    flight_from: Surface, // remember takeoff surface for correct visuals during flight
+    vx: f32,              // px/s
+    vy: f32,              // px/s (positive downward)
+    landing_left: f32,    // seconds to hold landing anim
 }
 
 // A single test case
@@ -111,10 +135,10 @@ struct TestSeq {
 
 impl Default for TestSeq {
     fn default() -> Self {
-        // Enumerate all appropriate cases
+        // Enumerate appropriate cases (ceiling Jumps disabled).
         let mut cases = Vec::new();
 
-        // Floor cases
+        // Floor
         cases.push(TestCase {
             surface: Surface::Floor,
             action: Action::Move,
@@ -151,33 +175,21 @@ impl Default for TestSeq {
             dir: 1.0,
             dur: CASE_DUR,
         });
-        // Jumps/Lands from floor both directions
+        // Floor jumps both directions
         cases.push(TestCase {
             surface: Surface::Floor,
             action: Action::Jumping,
-            dir: 1.0,
-            dur: 0.6,
-        });
-        cases.push(TestCase {
-            surface: Surface::Floor,
-            action: Action::Landing,
             dir: 1.0,
             dur: CASE_DUR,
         });
         cases.push(TestCase {
             surface: Surface::Floor,
             action: Action::Jumping,
-            dir: -1.0,
-            dur: 0.6,
-        });
-        cases.push(TestCase {
-            surface: Surface::Floor,
-            action: Action::Landing,
             dir: -1.0,
             dur: CASE_DUR,
         });
 
-        // Right wall: climb up/down + hide + jump up/down
+        // Right wall
         cases.push(TestCase {
             surface: Surface::RightWall,
             action: Action::Climb,
@@ -200,28 +212,16 @@ impl Default for TestSeq {
             surface: Surface::RightWall,
             action: Action::Jumping,
             dir: 1.0,
-            dur: 0.6,
-        });
-        cases.push(TestCase {
-            surface: Surface::RightWall,
-            action: Action::Landing,
-            dir: 1.0,
             dur: CASE_DUR,
-        });
+        }); // will arc left
         cases.push(TestCase {
             surface: Surface::RightWall,
             action: Action::Jumping,
             dir: -1.0,
-            dur: 0.6,
-        });
-        cases.push(TestCase {
-            surface: Surface::RightWall,
-            action: Action::Landing,
-            dir: -1.0,
             dur: CASE_DUR,
-        });
+        }); // still arc left (dir irrelevant on walls for jump)
 
-        // Ceiling: crawl left/right, hide, jump left/right
+        // Ceiling (no jumps)
         cases.push(TestCase {
             surface: Surface::Ceiling,
             action: Action::Climb,
@@ -240,32 +240,8 @@ impl Default for TestSeq {
             dir: -1.0,
             dur: CASE_DUR,
         });
-        cases.push(TestCase {
-            surface: Surface::Ceiling,
-            action: Action::Jumping,
-            dir: -1.0,
-            dur: 0.6,
-        });
-        cases.push(TestCase {
-            surface: Surface::Ceiling,
-            action: Action::Landing,
-            dir: -1.0,
-            dur: CASE_DUR,
-        });
-        cases.push(TestCase {
-            surface: Surface::Ceiling,
-            action: Action::Jumping,
-            dir: 1.0,
-            dur: 0.6,
-        });
-        cases.push(TestCase {
-            surface: Surface::Ceiling,
-            action: Action::Landing,
-            dir: 1.0,
-            dur: CASE_DUR,
-        });
 
-        // Left wall: climb down/up + hide + jump down/up (with your 180° + flip-Y-up rule)
+        // Left wall
         cases.push(TestCase {
             surface: Surface::LeftWall,
             action: Action::Climb,
@@ -288,27 +264,14 @@ impl Default for TestSeq {
             surface: Surface::LeftWall,
             action: Action::Jumping,
             dir: -1.0,
-            dur: 0.6,
-        });
-        cases.push(TestCase {
-            surface: Surface::LeftWall,
-            action: Action::Landing,
-            dir: -1.0,
             dur: CASE_DUR,
-        });
+        }); // will arc right
         cases.push(TestCase {
             surface: Surface::LeftWall,
             action: Action::Jumping,
             dir: 1.0,
-            dur: 0.6,
-        });
-        cases.push(TestCase {
-            surface: Surface::LeftWall,
-            action: Action::Landing,
-            dir: 1.0,
             dur: CASE_DUR,
-        });
-
+        }); // will arc right
         Self {
             cases,
             i: 0,
@@ -318,21 +281,20 @@ impl Default for TestSeq {
 }
 
 #[derive(Component)]
-struct TestTag; // attach to pet so we know it's under test sequencing
+struct TestTag;
 
 fn main() {
     App::new()
         .add_plugins(
             DefaultPlugins
                 .set(AssetPlugin {
-                    // Load assets from project root so `pet.png` can sit next to Cargo.toml
-                    file_path: ".".into(),
+                    file_path: ".".into(), // load pet.png from project root
                     ..default()
                 })
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Pet".into(),
-                        resolution: WindowResolution::new(64., 64.), // temp; corrected after image load
+                        resolution: WindowResolution::new(64., 64.), // overwritten after image load
                         resizable: false,
                         decorations: false,
                         transparent: true,
@@ -402,6 +364,11 @@ fn spawn_pet(mut commands: Commands, sheet: Res<SheetInfo>) {
             action: Action::Move,
             dir: 1.0,
             window_pos: IVec2::new(20, 20),
+            flight: FlightKind::None,
+            flight_from: Surface::Floor,
+            vx: 0.0,
+            vy: 0.0,
+            landing_left: 0.0,
         },
     ));
 }
@@ -498,8 +465,8 @@ fn animate_sprite(time: Res<Time>, mut q: Query<(&mut TextureAtlas, &mut Anim), 
     }
 }
 
-/// Drive the sequence: set PetState to the current case, advance when time is up.
-/// Also places the window at a sensible start point for each case to avoid immediate edge-crossing.
+/// Drive the sequence: set PetState to the current case, advance when allowed.
+/// IMPORTANT: Pause while Jumping/flight and during Landing to keep Jump visible until floor.
 fn test_driver(
     time: Res<Time>,
     mut seq: ResMut<TestSeq>,
@@ -518,6 +485,11 @@ fn test_driver(
     let Ok(win_entity) = window_entity_q.get_single() else {
         return;
     };
+
+    // Pause the sequencer while in air or landing
+    if st.flight != FlightKind::None || matches!(st.action, Action::Jumping | Action::Landing) {
+        return;
+    }
 
     // Screen size
     let (screen_w, screen_h) = if let Some(raw) = winit_windows.get_window(win_entity) {
@@ -550,8 +522,17 @@ fn test_driver(
         st.action = case.action;
         st.dir = case.dir;
 
+        // reset jump/landing state on case change
+        st.flight = FlightKind::None;
+        st.flight_from = st.surface;
+        st.vx = 0.0;
+        st.vy = 0.0;
+        st.landing_left = 0.0;
+
         // Position window to a reasonable start for each surface/direction
         let mut pos = st.window_pos;
+        let mid_y = (screen_h - fh) / 2;
+
         match st.surface {
             Surface::Floor => {
                 let y = screen_h - fh;
@@ -564,8 +545,9 @@ fn test_driver(
             }
             Surface::RightWall => {
                 let x = screen_w - fw;
-                // up starts near bottom, down starts near top
-                let y = if st.dir >= 0.0 {
+                let y = if matches!(st.action, Action::Jumping) {
+                    mid_y
+                } else if st.dir >= 0.0 {
                     screen_h - fh - START_MARGIN
                 } else {
                     START_MARGIN
@@ -574,7 +556,6 @@ fn test_driver(
             }
             Surface::Ceiling => {
                 let y = 0;
-                // left starts near right edge; right starts near left edge
                 let x = if st.dir < 0.0 {
                     screen_w - fw - START_MARGIN
                 } else {
@@ -584,8 +565,9 @@ fn test_driver(
             }
             Surface::LeftWall => {
                 let x = 0;
-                // down starts near top; up starts near bottom
-                let y = if st.dir < 0.0 {
+                let y = if matches!(st.action, Action::Jumping) {
+                    mid_y
+                } else if st.dir < 0.0 {
                     START_MARGIN
                 } else {
                     screen_h - fh - START_MARGIN
@@ -593,17 +575,87 @@ fn test_driver(
                 pos = IVec2::new(x, y);
             }
         }
+
         st.window_pos = pos;
         win.position = WindowPosition::At(pos);
     }
 }
 
-/// Apply motion (if the action is a moving one) and the correct orientation + animation row.
+/// Determine how the sprite should look for (surface, action, dir).
+/// Conventions: flip_x = mirror across Y axis (local X); flip_y = mirror across X axis (local Y)
+fn set_visual_for(
+    surface: Surface,
+    action: Action,
+    dir: f32,
+    anim: &mut Anim,
+    atlas: &mut TextureAtlas,
+    tf: &mut Transform,
+) {
+    let (row, fps, rot, flip_x, flip_y) = match (surface, action) {
+        // Floor
+        (Surface::Floor, Action::Move) => (ROW_WALK_R, FPS_MOVE, 0.0, dir < 0.0, false),
+        (Surface::Floor, Action::Idle) => (ROW_IDLE1, FPS_IDLE, 0.0, false, false),
+        (Surface::Floor, Action::Rolling) => (ROW_ROLL, FPS_ROLL, 0.0, dir < 0.0, false),
+        (Surface::Floor, Action::Hiding) => (ROW_HIDE, FPS_HIDE, 0.0, false, true),
+        (Surface::Floor, Action::Jumping) => (ROW_JUMP_R, FPS_JUMP, 0.0, dir < 0.0, false),
+        (Surface::Floor, Action::Landing) => (ROW_LAND_R, FPS_LAND, 0.0, dir < 0.0, false),
+
+        // Right wall
+        (Surface::RightWall, Action::Climb) => (ROW_CLIMB_R, FPS_CLIMB, 0.0, false, dir < 0.0),
+        (Surface::RightWall, Action::Hiding) => (
+            ROW_HIDE,
+            FPS_HIDE,
+            -std::f32::consts::FRAC_PI_2,
+            false,
+            false,
+        ),
+        (Surface::RightWall, Action::Jumping) => (ROW_JUMP_R, FPS_JUMP, 0.0, true, false), // mirror Y
+
+        // Ceiling (no jumping)
+        (Surface::Ceiling, Action::Climb) => (
+            ROW_CLIMB_R,
+            FPS_CLIMB,
+            std::f32::consts::FRAC_PI_2,
+            false,
+            dir > 0.0,
+        ),
+        (Surface::Ceiling, Action::Hiding) => (ROW_HIDE, FPS_HIDE, 0.0, false, false),
+
+        // Left wall
+        (Surface::LeftWall, Action::Climb) => (
+            ROW_CLIMB_R,
+            FPS_CLIMB,
+            std::f32::consts::PI,
+            false,
+            dir > 0.0,
+        ),
+        (Surface::LeftWall, Action::Hiding) => (
+            ROW_HIDE,
+            FPS_HIDE,
+            std::f32::consts::FRAC_PI_2,
+            false,
+            false,
+        ),
+        (Surface::LeftWall, Action::Jumping) => (ROW_JUMP_R, FPS_JUMP, 0.0, false, false),
+
+        // Fallback
+        _ => (ROW_IDLE1, FPS_IDLE, 0.0, false, false),
+    };
+
+    set_anim_if_changed(anim, atlas, row, fps);
+    tf.rotation = Quat::from_rotation_z(rot);
+    tf.scale = Vec3::new(
+        if flip_x { -1.0 } else { 1.0 },
+        if flip_y { -1.0 } else { 1.0 },
+        1.0,
+    );
+}
+
+/// Apply motion (including jump flight) and the correct orientation + animation row.
 fn apply_motion_and_orientation(
     time: Res<Time>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut q: Query<(&mut TextureAtlas, &mut Anim, &mut Transform, &mut PetState), With<TestTag>>,
-    sheet: Res<SheetInfo>,
 ) {
     let Ok(mut win) = windows.get_single_mut() else {
         return;
@@ -616,129 +668,155 @@ fn apply_motion_and_orientation(
     let fh: i32 = win.resolution.physical_height() as i32;
     let dt = time.delta_seconds();
 
-    // Orientation/animation mapping honoring your rules.
-    let mut set_visual = |surface: Surface, action: Action, dir: f32| {
-        // flip_x = mirror across Y axis; flip_y = mirror across X axis
-        let (row, fps, rot, flip_x, flip_y) = match (surface, action) {
-            // Floor
-            (Surface::Floor, Action::Move) => (ROW_WALK_R, FPS_MOVE, 0.0, dir < 0.0, false),
-            (Surface::Floor, Action::Idle) => (ROW_IDLE1, FPS_IDLE, 0.0, false, false),
-            (Surface::Floor, Action::Rolling) => (ROW_ROLL, FPS_ROLL, 0.0, dir < 0.0, false),
-            (Surface::Floor, Action::Hiding) => (ROW_HIDE, FPS_HIDE, 0.0, false, true), // mirror by X-axis
-
-            // Right wall
-            (Surface::RightWall, Action::Climb) => (ROW_CLIMB_R, FPS_CLIMB, 0.0, false, dir < 0.0), // flip Y when going down
-            (Surface::RightWall, Action::Hiding) => (
-                ROW_HIDE,
-                FPS_HIDE,
-                -std::f32::consts::FRAC_PI_2,
-                false,
-                false,
-            ),
-
-            // Ceiling
-            (Surface::Ceiling, Action::Climb) => (
-                ROW_CLIMB_R,
-                FPS_CLIMB,
-                std::f32::consts::FRAC_PI_2,
-                dir > 0.0,
-                false,
-            ),
-            (Surface::Ceiling, Action::Hiding) => (ROW_HIDE, FPS_HIDE, 0.0, false, false), // leave as is
-
-            // Left wall
-            (Surface::LeftWall, Action::Climb) => (
-                ROW_CLIMB_R,
-                FPS_CLIMB,
-                std::f32::consts::PI,
-                false,
-                dir > 0.0,
-            ), // flip Y when going up
-            (Surface::LeftWall, Action::Hiding) => (
-                ROW_HIDE,
-                FPS_HIDE,
-                std::f32::consts::FRAC_PI_2,
-                false,
-                false,
-            ),
-
-            // Jump/Land everywhere; follow the same flip/rot rules as Move on that surface
-            (Surface::Floor, Action::Jumping) => (ROW_JUMP_R, FPS_JUMP, 0.0, dir < 0.0, false),
-            (Surface::Floor, Action::Landing) => (ROW_LAND_R, FPS_LAND, 0.0, dir < 0.0, false),
-
-            (Surface::RightWall, Action::Jumping) => (ROW_JUMP_R, FPS_JUMP, 0.0, false, dir < 0.0),
-            (Surface::RightWall, Action::Landing) => (ROW_LAND_R, FPS_LAND, 0.0, false, dir < 0.0),
-
-            (Surface::Ceiling, Action::Jumping) => (
-                ROW_JUMP_R,
-                FPS_JUMP,
-                std::f32::consts::FRAC_PI_2,
-                dir > 0.0,
-                false,
-            ),
-            (Surface::Ceiling, Action::Landing) => (
-                ROW_LAND_R,
-                FPS_LAND,
-                std::f32::consts::FRAC_PI_2,
-                dir > 0.0,
-                false,
-            ),
-
-            (Surface::LeftWall, Action::Jumping) => {
-                (ROW_JUMP_R, FPS_JUMP, std::f32::consts::PI, false, dir > 0.0)
-            }
-            (Surface::LeftWall, Action::Landing) => {
-                (ROW_LAND_R, FPS_LAND, std::f32::consts::PI, false, dir > 0.0)
-            }
-
-            // Fallback
-            _ => (ROW_IDLE1, FPS_IDLE, 0.0, false, false),
-        };
-
-        set_anim_if_changed(&mut anim, &mut atlas, row, fps);
-        tf.rotation = Quat::from_rotation_z(rot);
-        tf.scale = Vec3::new(
-            if flip_x { -1.0 } else { 1.0 },
-            if flip_y { -1.0 } else { 1.0 },
-            1.0,
-        );
-    };
-
-    // Update orientation/animation first
-    set_visual(st.surface, st.action, st.dir);
-
-    // Move along the edge only for movement-like actions
-    let mut pos = st.window_pos;
-    match st.surface {
-        Surface::Floor => {
-            if matches!(st.action, Action::Move | Action::Rolling) {
-                pos.x = (pos.x as f32 + SPEED_FLOOR * st.dir * dt) as i32;
-            }
-        }
-        Surface::RightWall => {
-            if matches!(st.action, Action::Climb) {
-                pos.y = (pos.y as f32 - SPEED_WALL * st.dir * dt) as i32; // up when dir>0
-            }
-        }
-        Surface::Ceiling => {
-            if matches!(st.action, Action::Climb) {
-                pos.x = (pos.x as f32 + SPEED_CEIL * st.dir * dt) as i32; // left when dir<0
-            }
-        }
-        Surface::LeftWall => {
-            if matches!(st.action, Action::Climb) {
-                pos.y = (pos.y as f32 - SPEED_WALL * st.dir * dt) as i32; // down when dir<0
-            }
-        }
-    }
-
-    // Clamp (simple safety). In test mode we don't transition surfaces automatically.
+    // Virtual desktop rectangle (we just need a consistent "floor" line)
     let (screen_w, screen_h) = (
         1920.max(fw + 2 * START_MARGIN),
         1080.max(fh + 2 * START_MARGIN),
     );
-    pos.x = pos.x.clamp(0, screen_w.saturating_sub(fw));
-    pos.y = pos.y.clamp(0, screen_h.saturating_sub(fh));
+    let max_x = screen_w.saturating_sub(fw);
+    let max_y = screen_h.saturating_sub(fh); // "floor" y
+
+    // Working position
+    let mut pos = st.window_pos;
+
+    // ENTER FLIGHT on Jumping (except ceiling)
+    if matches!(st.action, Action::Jumping) && st.flight == FlightKind::None {
+        if matches!(st.surface, Surface::Ceiling) {
+            // Disallow ceiling jump: ignore
+            set_visual_for(
+                st.surface, st.action, st.dir, &mut anim, &mut atlas, &mut tf,
+            );
+        } else {
+            // Remember takeoff surface for visuals during flight
+            st.flight_from = st.surface;
+
+            // Set visuals for jump start (will be maintained in flight)
+            set_visual_for(
+                st.flight_from,
+                Action::Jumping,
+                st.dir,
+                &mut anim,
+                &mut atlas,
+                &mut tf,
+            );
+
+            match st.surface {
+                Surface::Floor => {
+                    // Parabolic arc: initial up velocity, then gravity; horizontal based on dir
+                    st.vx = FLOOR_JUMP_VX * if st.dir >= 0.0 { 1.0 } else { -1.0 };
+                    st.vy = FLOOR_JUMP_VY0; // up (negative)
+                }
+                Surface::RightWall => {
+                    // Push off to the LEFT away from the right wall
+                    st.vx = -WALL_JUMP_VX;
+                    st.vy = WALL_JUMP_VY0;
+                }
+                Surface::LeftWall => {
+                    // Push off to the RIGHT away from the left wall
+                    st.vx = WALL_JUMP_VX;
+                    st.vy = WALL_JUMP_VY0;
+                }
+                Surface::Ceiling => {}
+            }
+            st.flight = FlightKind::Parabola;
+            st.landing_left = 0.0;
+        }
+    }
+
+    // Flight step: KEEP JUMP SPRITE while flying until we hit the floor.
+    if st.flight != FlightKind::None {
+        // Integrate velocities (parabola)
+        st.vy += GRAVITY * dt; // gravity pulls down (+)
+        pos.x = (pos.x as f32 + st.vx * dt) as i32;
+        pos.y = (pos.y as f32 + st.vy * dt) as i32;
+
+        // Clamp to bounds
+        pos.x = pos.x.clamp(0, max_x);
+        pos.y = pos.y.clamp(0, max_y);
+
+        // Always render JUMP during flight, using the takeoff surface orientation
+        set_visual_for(
+            st.flight_from,
+            Action::Jumping,
+            st.dir,
+            &mut anim,
+            &mut atlas,
+            &mut tf,
+        );
+
+        if pos.y >= max_y {
+            // Touchdown
+            st.flight = FlightKind::None;
+            st.surface = Surface::Floor;
+            st.action = Action::Landing;
+
+            // Facing: floor jumps keep their left/right; wall jumps face right by default
+            let came_from_wall = matches!(st.flight_from, Surface::RightWall | Surface::LeftWall);
+            st.dir = if came_from_wall {
+                1.0
+            } else if st.vx >= 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
+
+            st.landing_left = LANDING_HOLD;
+            set_visual_for(
+                Surface::Floor,
+                Action::Landing,
+                st.dir,
+                &mut anim,
+                &mut atlas,
+                &mut tf,
+            );
+        }
+    } else {
+        // Not in flight: set visuals for current state and apply regular motions
+        set_visual_for(
+            st.surface, st.action, st.dir, &mut anim, &mut atlas, &mut tf,
+        );
+
+        match st.surface {
+            Surface::Floor => {
+                if matches!(st.action, Action::Move | Action::Rolling) {
+                    pos.x = (pos.x as f32 + SPEED_FLOOR * st.dir * dt) as i32;
+                }
+                pos.y = max_y;
+            }
+            Surface::RightWall => {
+                if matches!(st.action, Action::Climb) {
+                    pos.x = max_x;
+                    pos.y = (pos.y as f32 - SPEED_WALL * st.dir * dt) as i32; // up when dir>0
+                }
+                pos.x = max_x;
+                pos.y = pos.y.clamp(0, max_y);
+            }
+            Surface::Ceiling => {
+                if matches!(st.action, Action::Climb) {
+                    pos.y = 0;
+                    pos.x = (pos.x as f32 + SPEED_CEIL * st.dir * dt) as i32; // left when dir<0, right when dir>0
+                }
+                pos.y = 0;
+                pos.x = pos.x.clamp(0, max_x);
+            }
+            Surface::LeftWall => {
+                if matches!(st.action, Action::Climb) {
+                    pos.x = 0;
+                    pos.y = (pos.y as f32 - SPEED_WALL * st.dir * dt) as i32; // down when dir<0
+                }
+                pos.x = 0;
+                pos.y = pos.y.clamp(0, max_y);
+            }
+        }
+    }
+
+    // Landing hold timer
+    if matches!(st.action, Action::Landing) {
+        st.landing_left -= dt;
+        if st.landing_left <= 0.0 {
+            st.action = Action::Move; // continue walking on the floor in the same dir
+        }
+    }
 
     st.window_pos = pos;
     win.position = WindowPosition::At(pos);
