@@ -235,7 +235,7 @@ impl Default for TestSeq {
             },
         });
 
-        // ===== Floor → Wall jumps (NEW) =====
+        // ===== Floor → Wall jumps (TEST) =====
         cases.push(TestCase {
             surface: Surface::Floor,
             action: Action::Jumping,
@@ -426,7 +426,8 @@ fn main() {
             })
             .set(WindowPlugin {
                 primary_window: Some(Window {
-                    title: "Pet".into(),
+                    title: "tovaras".into(),
+                    name: Some("tovaras".into()),
                     resolution: WindowResolution::new(64., 64.), // overwritten after image load
                     resizable: false,
                     decorations: false,
@@ -918,7 +919,23 @@ fn apply_motion_and_orientation(
             Surface::RightWall => {
                 if matches!(st.action, Action::Climb) {
                     pos.x = max_x;
-                    pos.y = (pos.y as f32 - SPEED_WALL * st.dir * dt) as i32; // up when dir>0
+                    // up when dir>0, down when dir<0 (Y decreases upward)
+                    pos.y = (pos.y as f32 - SPEED_WALL * st.dir * dt) as i32;
+
+                    // --- NEW: transitions at corners ---
+                    if pos.y <= 0 && st.dir > 0.0 {
+                        // climbed up to the top-right corner -> onto the ceiling moving left
+                        pos.y = 0;
+                        st.surface = Surface::Ceiling;
+                        st.action = Action::Climb;
+                        st.dir = -1.0; // move left on ceiling
+                    } else if pos.y >= max_y && st.dir < 0.0 {
+                        // climbed down to the floor at right corner -> onto floor moving left
+                        pos.y = max_y;
+                        st.surface = Surface::Floor;
+                        st.action = Action::Move;
+                        st.dir = -1.0; // move left on floor
+                    }
                 }
                 pos.x = max_x;
                 pos.y = pos.y.clamp(0, max_y);
@@ -927,6 +944,21 @@ fn apply_motion_and_orientation(
                 if matches!(st.action, Action::Climb) {
                     pos.y = 0;
                     pos.x = (pos.x as f32 + SPEED_CEIL * st.dir * dt) as i32; // left when dir<0, right when dir>0
+
+                    // Keep ceiling->wall transitions so the loop is continuous
+                    if pos.x <= 0 && st.dir < 0.0 {
+                        // reached top-left corner -> down the left wall
+                        pos.x = 0;
+                        st.surface = Surface::LeftWall;
+                        st.action = Action::Climb;
+                        st.dir = -1.0; // climb down
+                    } else if pos.x >= max_x && st.dir > 0.0 {
+                        // reached top-right corner -> down the right wall
+                        pos.x = max_x;
+                        st.surface = Surface::RightWall;
+                        st.action = Action::Climb;
+                        st.dir = -1.0; // climb down
+                    }
                 }
                 pos.y = 0;
                 pos.x = pos.x.clamp(0, max_x);
@@ -934,7 +966,23 @@ fn apply_motion_and_orientation(
             Surface::LeftWall => {
                 if matches!(st.action, Action::Climb) {
                     pos.x = 0;
-                    pos.y = (pos.y as f32 - SPEED_WALL * st.dir * dt) as i32; // down when dir<0
+                    // up when dir>0, down when dir<0 (Y decreases upward)
+                    pos.y = (pos.y as f32 - SPEED_WALL * st.dir * dt) as i32;
+
+                    // --- NEW: transitions at corners ---
+                    if pos.y <= 0 && st.dir > 0.0 {
+                        // climbed up to the top-left corner -> onto the ceiling moving right
+                        pos.y = 0;
+                        st.surface = Surface::Ceiling;
+                        st.action = Action::Climb;
+                        st.dir = 1.0; // move right on ceiling
+                    } else if pos.y >= max_y && st.dir < 0.0 {
+                        // climbed down to the floor at left corner -> onto floor moving right
+                        pos.y = max_y;
+                        st.surface = Surface::Floor;
+                        st.action = Action::Move;
+                        st.dir = 1.0; // move right on floor
+                    }
                 }
                 pos.x = 0;
                 pos.y = pos.y.clamp(0, max_y);
