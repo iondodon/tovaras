@@ -12,10 +12,10 @@ const ROW_FRAMES: [usize; 9] = [13, 5, 17, 27, 1, 9, 1, 8, 8];
 const ROW_IDLE1: usize = 0;
 const ROW_WALK_R: usize = 1;
 const ROW_IDLE2: usize = 2; // available for variety
-const ROW_IDLE3: usize = 3; // available for variety
+const ROW_GIVING_FLOWERS: usize = 3; // was IDLE3
 const ROW_JUMP_R: usize = 4;
 const ROW_LAND_R: usize = 5;
-const ROW_ROLL: usize = 6;
+const ROW_SLEEP: usize = 6; // was ROLL
 const ROW_HIDE: usize = 7;
 const ROW_CLIMB_R: usize = 8;
 
@@ -23,8 +23,10 @@ const FPS_IDLE: f32 = 10.0;
 const FPS_MOVE: f32 = 14.0;
 const FPS_CLIMB: f32 = 12.0;
 const FPS_HIDE: f32 = 10.0;
-const FPS_ROLL: f32 = 16.0;
-const FPS_JUMP: f32 = 1.0; // jump pose; we hold it during flight
+const FPS_SLEEP: f32 = 8.0;
+// slower “romantic” giving-flowers animation:
+const FPS_GIVING_FLOWERS: f32 = 6.0;
+const FPS_JUMP: f32 = 1.0; // we hold this pose during flight
 const FPS_LAND: f32 = 20.0;
 
 const SPEED_FLOOR: f32 = 160.0;
@@ -39,6 +41,8 @@ const WALL_JUMP_VY0: f32 = -880.0; // px/s (initial up)
 // ===== Test sequencer config =====
 const CASE_DUR: f32 = 1.5; // seconds per case (paused during Jump/Land)
 const START_MARGIN: i32 = 40;
+// Let GivingFlowers play its full 27 frames at the chosen FPS (+ small padding)
+const DUR_GIVING_FLOWERS: f32 = (ROW_FRAMES[ROW_GIVING_FLOWERS] as f32) / FPS_GIVING_FLOWERS + 0.5;
 
 // Landing behavior
 const LANDING_HOLD: f32 = 0.5; // animation hold on floor
@@ -59,8 +63,9 @@ enum Action {
     Climb,
     Jumping,
     Landing,
-    Rolling,
-    Hiding,
+    Sleeping,      // row 6
+    Hiding,        // row 7
+    GivingFlowers, // row 3, floor-only in place
 }
 
 #[derive(Resource, Default)]
@@ -148,7 +153,7 @@ impl Default for TestSeq {
     fn default() -> Self {
         let mut cases = Vec::new();
 
-        // ===== Floor movement / idles =====
+        // ===== Floor movement / idle / sleeping / giving flowers / hiding =====
         cases.push(TestCase {
             surface: Surface::Floor,
             action: Action::Move,
@@ -172,16 +177,16 @@ impl Default for TestSeq {
         });
         cases.push(TestCase {
             surface: Surface::Floor,
-            action: Action::Rolling,
+            action: Action::Sleeping,
             dir: 1.0,
             dur: CASE_DUR,
             preset: JumpPreset::None,
         });
         cases.push(TestCase {
             surface: Surface::Floor,
-            action: Action::Rolling,
-            dir: -1.0,
-            dur: CASE_DUR,
+            action: Action::GivingFlowers,
+            dir: 1.0,
+            dur: DUR_GIVING_FLOWERS,
             preset: JumpPreset::None,
         });
         cases.push(TestCase {
@@ -642,7 +647,6 @@ fn test_driver(
                 };
                 pos = IVec2::new(x, y.clamp(0, max_y));
                 if matches!(st.action, Action::Jumping) {
-                    // pick a floor target via preset (anywhere on floor)
                     st.target_x = match case.preset {
                         JumpPreset::WallToFloorPct { target_pct } => {
                             ((max_x as f32) * target_pct).round() as i32
@@ -650,7 +654,7 @@ fn test_driver(
                         _ => START_MARGIN,
                     }
                     .clamp(0, max_x);
-                    // face left on landing from right wall (we mirror landing sprite by Y)
+                    // face left on landing from right wall
                     st.dir = -1.0;
                 }
             }
@@ -706,7 +710,10 @@ fn set_visual_for(
         // Floor
         (Surface::Floor, Action::Move) => (ROW_WALK_R, FPS_MOVE, 0.0, dir < 0.0, false),
         (Surface::Floor, Action::Idle) => (ROW_IDLE1, FPS_IDLE, 0.0, false, false),
-        (Surface::Floor, Action::Rolling) => (ROW_ROLL, FPS_ROLL, 0.0, dir < 0.0, false),
+        (Surface::Floor, Action::Sleeping) => (ROW_SLEEP, FPS_SLEEP, 0.0, false, false),
+        (Surface::Floor, Action::GivingFlowers) => {
+            (ROW_GIVING_FLOWERS, FPS_GIVING_FLOWERS, 0.0, false, false)
+        }
         (Surface::Floor, Action::Hiding) => (ROW_HIDE, FPS_HIDE, 0.0, false, true),
         (Surface::Floor, Action::Jumping) => (ROW_JUMP_R, FPS_JUMP, 0.0, dir < 0.0, false),
         (Surface::Floor, Action::Landing) => (ROW_LAND_R, FPS_LAND, 0.0, dir < 0.0, false),
@@ -778,7 +785,7 @@ fn apply_motion_and_orientation(
     let fh: i32 = win.resolution.physical_height() as i32;
     let dt = time.delta_seconds();
 
-    // A consistent virtual desktop rectangle
+    // A consistent virtual desktop rectangle (fallback if monitor query isn't available here)
     let (screen_w, screen_h) = (
         1920.max(fw + 2 * START_MARGIN),
         1080.max(fh + 2 * START_MARGIN),
@@ -807,16 +814,14 @@ fn apply_motion_and_orientation(
 
             match st.surface {
                 Surface::Floor => {
-                    // Time of flight for same start/end height: y(t) = y0 + vy0 t + 0.5 g t^2, with y0=max_y
-                    let t = 2.0 * (-FLOOR_JUMP_VY0) / GRAVITY; // up then down to same height
+                    // Same start/end height: T = 2*|vy0| / g
+                    let t = 2.0 * (-FLOOR_JUMP_VY0) / GRAVITY;
                     let dx = (st.target_x - pos.x) as f32;
                     st.vx = if t > 0.0 { dx / t } else { 0.0 };
                     st.vy = FLOOR_JUMP_VY0;
                 }
                 Surface::RightWall | Surface::LeftWall => {
-                    // Solve for time-to-floor from current height:
-                    // y(t) = y0 + vy0*t + 0.5*g*t^2  ; we want y(t)=max_y
-                    // 0.5*g*t^2 + vy0*t + (y0 - max_y) = 0  -> pick positive root
+                    // Time to floor from current height (quadratic)
                     let y0 = pos.y as f32;
                     let c = y0 - (max_y as f32);
                     let a = 0.5 * GRAVITY;
@@ -825,16 +830,12 @@ fn apply_motion_and_orientation(
                     let t = if disc >= 0.0 {
                         (-b + disc.sqrt()) / (2.0 * a)
                     } else {
-                        // fallback: assume 1s flight if something degenerate happens
                         1.0
                     };
 
-                    // Choose landing target_x (already set by test_driver), compute vx to hit it
                     let dx = (st.target_x - pos.x) as f32;
                     st.vx = if t > 0.0 { dx / t } else { 0.0 };
                     st.vy = WALL_JUMP_VY0;
-
-                    // Facing rule during flight is determined by takeoff surface sprite settings
                 }
                 Surface::Ceiling => {}
             }
@@ -907,14 +908,20 @@ fn apply_motion_and_orientation(
         match st.surface {
             Surface::Floor => {
                 match st.action {
-                    Action::Move | Action::Rolling => {
+                    Action::Move => {
                         pos.x = (pos.x as f32 + SPEED_FLOOR * st.dir * dt) as i32;
                     }
                     Action::Landing => {
                         // Slide during landing
                         pos.x = (pos.x as f32 + LANDING_DRIFT * st.dir * dt) as i32;
                     }
-                    _ => {}
+                    // No movement while Sleeping, Idle, GivingFlowers, Hiding
+                    Action::Sleeping
+                    | Action::Idle
+                    | Action::GivingFlowers
+                    | Action::Hiding
+                    | Action::Climb
+                    | Action::Jumping => {}
                 }
                 pos.y = max_y;
             }
