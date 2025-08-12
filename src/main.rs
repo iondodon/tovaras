@@ -1,5 +1,12 @@
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
+use bevy::render::render_asset::RenderAssetUsages;
+use bevy::render::render_resource::Extent3d;
+use bevy::render::render_resource::TextureDimension;
+use bevy::render::render_resource::TextureFormat;
+use bevy::render::texture::CompressedImageFormats;
+use bevy::render::texture::ImageSampler;
+use bevy::render::texture::ImageType;
 use bevy::sprite::TextureAtlasLayout;
 use bevy::window::{PrimaryWindow, WindowLevel, WindowMode, WindowPosition, WindowResolution};
 use bevy::winit::WinitWindows;
@@ -474,11 +481,11 @@ fn setup_camera(mut commands: Commands) {
 
 /// Queue the texture and make an atlas layout (grid).
 fn load_assets(
-    asset_server: Res<AssetServer>,
+    mut images: ResMut<Assets<Image>>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
     mut sheet: ResMut<SheetInfo>,
 ) {
-    sheet.texture = asset_server.load("pet.png");
+    sheet.texture = load_pet_image_from_memory(&mut images);
     // placeholder cell size; overwritten after image loads
     let layout = TextureAtlasLayout::from_grid(
         UVec2::new(1, 1),
@@ -1432,4 +1439,20 @@ fn apply_case_continuous(
 
     st.window_pos = pos;
     win.position = WindowPosition::At(pos);
+}
+
+fn load_pet_image_from_memory(images: &mut Assets<Image>) -> Handle<Image> {
+    let bytes: &[u8] = include_bytes!("../assets/pet.png");
+
+    let image = Image::from_buffer(
+        bytes,
+        ImageType::Extension("png"),
+        CompressedImageFormats::all(),
+        true, // sRGB for regular color sprites
+        ImageSampler::nearest(),
+        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+    )
+    .expect("failed to decode embedded pet.png");
+
+    images.add(image)
 }
