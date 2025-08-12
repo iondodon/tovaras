@@ -1,5 +1,6 @@
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
+use bevy::sprite::TextureAtlasLayout;
 use bevy::window::{PrimaryWindow, WindowLevel, WindowMode, WindowPosition, WindowResolution};
 use bevy::winit::WinitWindows;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -32,10 +33,10 @@ const FPS_GIVING_FLOWERS: f32 = 6.0;
 const FPS_JUMP: f32 = 1.0; // we hold this pose during flight
 const FPS_LAND: f32 = 20.0;
 
-// ===== Speeds (slowed down) =====
-const SPEED_FLOOR: f32 = 90.0;
-const SPEED_WALL: f32 = 70.0;
-const SPEED_CEIL: f32 = 90.0;
+// ===== Speeds (slowed down for “lazy” vibe) =====
+const SPEED_FLOOR: f32 = 70.0;
+const SPEED_WALL: f32 = 55.0;
+const SPEED_CEIL: f32 = 70.0;
 
 // ===== Jump physics =====
 const GRAVITY: f32 = 1800.0; // px/s^2 downward (+)
@@ -50,7 +51,9 @@ const DUR_GIVING_FLOWERS: f32 = (ROW_FRAMES[ROW_GIVING_FLOWERS] as f32) / FPS_GI
 
 // Landing behavior
 const LANDING_HOLD: f32 = 0.5; // animation hold on floor
-const LANDING_DRIFT: f32 = 100.0; // px/s slide along floor during landing (slightly reduced)
+const LANDING_DRIFT: f32 = 70.0; // px/s slide along floor during landing (reduced)
+
+// ================================================
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Surface {
@@ -67,7 +70,7 @@ enum Action {
     Climb,
     Jumping,
     Landing,
-    Sleeping,      // row 6
+    Sleeping,      // row 6 — currently never scheduled
     Hiding,        // row 7
     GivingFlowers, // row 3, floor-only in place
 }
@@ -169,7 +172,7 @@ impl Default for TestSeq {
     fn default() -> Self {
         let mut cases = Vec::new();
 
-        // ===== Floor movement / idle / sleeping / giving flowers / hiding =====
+        // ===== Floor movement / idle / giving flowers / hiding =====
         cases.push(TestCase {
             surface: Surface::Floor,
             action: Action::Move,
@@ -191,13 +194,7 @@ impl Default for TestSeq {
             dur: CASE_DUR,
             preset: JumpPreset::None,
         });
-        cases.push(TestCase {
-            surface: Surface::Floor,
-            action: Action::Sleeping,
-            dir: 1.0,
-            dur: CASE_DUR,
-            preset: JumpPreset::None,
-        });
+        // Sleeping intentionally omitted (commented out behavior)
         cases.push(TestCase {
             surface: Surface::Floor,
             action: Action::GivingFlowers,
@@ -404,7 +401,7 @@ struct RandomCtrl {
 impl Default for RandomCtrl {
     fn default() -> Self {
         // Longer action durations overall (slower changes)
-        Self { left: 0.6 }
+        Self { left: 1.2 }
     }
 }
 
@@ -635,7 +632,7 @@ fn set_visual_for(
         // Floor
         (Surface::Floor, Action::Move) => (ROW_WALK_R, FPS_MOVE, 0.0, dir < 0.0, false),
         (Surface::Floor, Action::Idle) => (ROW_IDLE1, FPS_IDLE, 0.0, false, false),
-        (Surface::Floor, Action::Sleeping) => (ROW_SLEEP, FPS_SLEEP, 0.0, false, false),
+        (Surface::Floor, Action::Sleeping) => (ROW_SLEEP, FPS_SLEEP, 0.0, false, false), // not used now
         (Surface::Floor, Action::GivingFlowers) => {
             (ROW_GIVING_FLOWERS, FPS_GIVING_FLOWERS, 0.0, false, false)
         }
@@ -659,7 +656,7 @@ fn set_visual_for(
             ROW_CLIMB_R,
             FPS_CLIMB,
             std::f32::consts::FRAC_PI_2,
-            dir > 0.0,
+            dir < 0.0, // FIX: mirror only when moving LEFT
             false,
         ),
         (Surface::Ceiling, Action::Hiding) => (ROW_HIDE, FPS_HIDE, 0.0, false, false),
@@ -738,22 +735,21 @@ fn apply_motion_and_orientation(
 
             match st.surface {
                 Surface::Floor => {
-                    // Two possibilities: floor->floor OR floor->wall (left/right)
+                    // Floor->wall or floor->floor
                     if let Some((wall, ty)) = st.wall_target.take() {
-                        // We already have a wall target (set by driver). Solve for t using Y(t) = ty.
+                        // solve time using Y(t) to hit wall target height
                         let y0 = max_y as f32;
                         let c = y0 - (ty as f32);
                         let a = 0.5 * GRAVITY;
                         let b = FLOOR_JUMP_VY0;
                         let disc = b * b - 4.0 * a * c;
                         let t = if disc >= 0.0 {
-                            // pick positive root
                             (-b + disc.sqrt()) / (2.0 * a)
                         } else {
                             1.0
                         };
 
-                        // vx to reach target wall X at that time
+                        // vx to reach target wall x at that time
                         let wall_x = if matches!(wall, Surface::LeftWall) {
                             0
                         } else {
@@ -763,7 +759,7 @@ fn apply_motion_and_orientation(
                         st.vx = if t > 0.0 { dx / t } else { 0.0 };
                         st.vy = FLOOR_JUMP_VY0;
                     } else {
-                        // Default floor->floor (use target_x)
+                        // floor->floor
                         let t = 2.0 * (-FLOOR_JUMP_VY0) / GRAVITY;
                         let dx = (st.target_x - pos.x) as f32;
                         st.vx = if t > 0.0 { dx / t } else { 0.0 };
@@ -824,7 +820,6 @@ fn apply_motion_and_orientation(
                     st.flight = FlightKind::None;
                     st.surface = Surface::LeftWall;
                     st.action = Action::Climb;
-                    // choose climb dir from current vertical velocity: up if still going up, else down
                     st.dir = if st.vy <= 0.0 { 1.0 } else { -1.0 };
                     st.wall_target = None;
                 }
@@ -922,7 +917,7 @@ fn apply_motion_and_orientation(
                     // up when dir>0, down when dir<0 (Y decreases upward)
                     pos.y = (pos.y as f32 - SPEED_WALL * st.dir * dt) as i32;
 
-                    // --- NEW: transitions at corners ---
+                    // transitions at corners
                     if pos.y <= 0 && st.dir > 0.0 {
                         // climbed up to the top-right corner -> onto the ceiling moving left
                         pos.y = 0;
@@ -945,7 +940,6 @@ fn apply_motion_and_orientation(
                     pos.y = 0;
                     pos.x = (pos.x as f32 + SPEED_CEIL * st.dir * dt) as i32; // left when dir<0, right when dir>0
 
-                    // Keep ceiling->wall transitions so the loop is continuous
                     if pos.x <= 0 && st.dir < 0.0 {
                         // reached top-left corner -> down the left wall
                         pos.x = 0;
@@ -969,7 +963,7 @@ fn apply_motion_and_orientation(
                     // up when dir>0, down when dir<0 (Y decreases upward)
                     pos.y = (pos.y as f32 - SPEED_WALL * st.dir * dt) as i32;
 
-                    // --- NEW: transitions at corners ---
+                    // transitions at corners
                     if pos.y <= 0 && st.dir > 0.0 {
                         // climbed up to the top-left corner -> onto the ceiling moving right
                         pos.y = 0;
@@ -1087,19 +1081,19 @@ fn random_driver(
         return;
     }
 
-    // ----- pick next random case respecting rules (longer durations) -----
+    // ----- pick next random case respecting rules (slower/less distracting) -----
     let mut case = pick_random_case(&mut rnd, st.surface);
 
     // duration per action (randomized ranges) — longer to keep actions longer
     let dur = match case.action {
         Action::GivingFlowers => DUR_GIVING_FLOWERS,
-        Action::Sleeping => rnd.range_f32(3.0, 6.0),
-        Action::Hiding => rnd.range_f32(1.2, 2.0),
-        Action::Idle => rnd.range_f32(2.0, 4.0),
-        Action::Move => rnd.range_f32(2.0, 4.0),
-        Action::Climb => rnd.range_f32(2.0, 4.0),
-        Action::Jumping => 0.2, // ignored during flight
-        Action::Landing => 0.2, // ignored (landing hold separate)
+        Action::Hiding => rnd.range_f32(1.5, 2.5),
+        Action::Idle => rnd.range_f32(3.0, 6.0),
+        Action::Move => rnd.range_f32(3.0, 6.0),
+        Action::Climb => rnd.range_f32(3.0, 6.0),
+        Action::Jumping => 0.2,  // ignored during flight
+        Action::Landing => 0.2,  // ignored (landing hold separate)
+        Action::Sleeping => 0.0, // unreachable now
     };
     ctrl.left = dur;
 
@@ -1113,22 +1107,25 @@ fn random_driver(
 fn pick_random_case(rng: &mut TinyRng, current_surface: Surface) -> TestCase {
     let action = match current_surface {
         Surface::Floor => {
-            // Allow: Move, Idle, Sleeping, GivingFlowers, Hiding, Jumping
-            let roll = rng.next_u32() % 6;
-            match roll {
+            // Allow: Move, Idle, GivingFlowers, Hiding, sometimes Jumping (rarer)
+            let roll = rng.next_u32() % 4;
+            let base = match roll {
                 0 => Action::Move,
                 1 => Action::Idle,
-                2 => Action::Sleeping,
-                3 => Action::GivingFlowers,
-                4 => Action::Hiding,
-                _ => Action::Jumping,
+                2 => Action::GivingFlowers,
+                _ => Action::Hiding,
+            };
+            if rng.chance(0.15) {
+                Action::Jumping
+            } else {
+                base
             }
         }
         Surface::RightWall | Surface::LeftWall => {
-            // Allow: Climb, Hiding, Jumping (to floor)
+            // Allow: Climb, Hiding, sometimes Jumping (to floor)
             if rng.chance(0.20) {
                 Action::Hiding
-            } else if rng.chance(0.30) {
+            } else if rng.chance(0.20) {
                 Action::Jumping
             } else {
                 Action::Climb
@@ -1181,8 +1178,7 @@ fn pick_random_case(rng: &mut TinyRng, current_surface: Surface) -> TestCase {
             } else {
                 -1.0
             }
-        } // right or left on ceiling
-        // Other actions ignore dir or use facing only
+        } // right or left
         _ => 1.0,
     };
 
